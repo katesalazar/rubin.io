@@ -1,0 +1,785 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.2.0">Jekyll</generator><link href="http://rubin.io/feed.xml" rel="self" type="application/atom+xml" /><link href="http://rubin.io/" rel="alternate" type="text/html" /><updated>2021-09-23T18:00:30+00:00</updated><id>http://rubin.io/feed.xml</id><title type="html">Jeremy Rubin</title><subtitle>Bitcoin, Hardware, FP, ML, Crypto @ MIT</subtitle><author><name>Jeremy Rubin</name></author><entry><title type="html">CheckSequenceVerify DISCOURAGE_UPGRADABLE_NOPS Defect</title><link href="http://rubin.io/bitcoin/2021/09/03/upgradable-nops-flaw/" rel="alternate" type="text/html" title="CheckSequenceVerify DISCOURAGE_UPGRADABLE_NOPS Defect" /><published>2021-09-03T00:00:00+00:00</published><updated>2021-09-03T00:00:00+00:00</updated><id>http://rubin.io/bitcoin/2021/09/03/upgradable-nops-flaw</id><content type="html" xml:base="http://rubin.io/bitcoin/2021/09/03/upgradable-nops-flaw/">&lt;p&gt;The other day I was writing some tests for BIP-119 (shoutout
+&lt;a href=&quot;https://twitter.com/glozow&quot;&gt;Gloria&lt;/a&gt; for the detailed feedback on improving
+tests). I noticed something peculiar while attempting to write static test
+vectors for CTV. This peculiar thing led me to discover a minor flaw in
+Bitcoin’s interpreter – it isn’t going to break anything in the short term,
+but it has implications for how certain upgrades might be done in the future.&lt;/p&gt;
+
+&lt;p&gt;In the interpreter we pass specific flags in at different times to check
+different rules at different times. This is used because we generally want the
+Mempool to be “restrictive” and block validation to be unrestrictive.  That
+sounds like the opposite of what you would want, but it’s because we want to
+ensure that we never break a consensus rule, so our mempool is “strict” to
+protect e.g. a miner from making a bad block, because our node’s understanding
+of consensus validation is less strict so we always know the mempool is full of
+stuff that will pass consensus.&lt;/p&gt;
+
+&lt;p&gt;One of the specific types of “stricter” that is in the mempool is for things
+that may be changed in the future. For example, Taproot (a change proposed to
+Bitcoin) uses a Witness V1 script. Before Taproot activates, Witness V1 Scripts
+are &lt;em&gt;always&lt;/em&gt; valid no matter if they’re signed or not. After it activates, a
+new rule takes effect in consensus, and Witness V1 Scripts will be processed in
+accordance with Taproot’s rules. Because the Mempool is stricter, it never lets in
+any Witness V1 script spends until it knows how to properly validate it. That way,
+for a miner who doesn’t want to upgrade to Taproot, they can use the old rules in their
+Mempool and not ever mine a bad block.&lt;/p&gt;
+
+&lt;p&gt;One of the flags used for this purpose is DISCOURAGE_UPGRADABLE_NOPS. A NOP
+is simply an opcode in bitcoin that has no effect (nada). In the future,
+someone could add a rule to that NOP (e.g., check that the stack args present
+when the NOP executes satisfy some properties or the transaction is invalid,
+but do not remove anything from the stack so that the old consensus rules still
+seem correct). This is sufficient for consensus, but maybe people have decided
+that they want to create a bunch of outputs with NOPs in it because they are
+cute. Then, a fork that would add new semantics to a NOP would have the impact
+of locking people out of their wallets.  To prevent this, the Mempool uses the
+rule DISCOURAGE_UPGRADABLE_NOPS which makes it so that if you try to
+broadcast an output script with a NOP it gets bounced from the Mempool (but not
+consensus of course, should a deviant miner mine such a transaction). Hopefully
+our users get the message to not use NOPs because we… discourage upgradable
+nops.&lt;/p&gt;
+
+&lt;p&gt;CheckSequenceVerify (CSV) was one such NOP before it grew up to be a big n’
+important opcode. Essentially all that CSV does is check that the sequence
+field is set in a particular manner. This lets you set relative block and time
+lock (e.g., takes this much time before a coin is spendable again). However,
+it’s possible that we might come up with new kinds of lock times in the future,
+so we have a bit we can set in the sequence that makes it ignored for consensus
+purposes. Maybe in the future, someone would find something nice to do with it,
+eh?&lt;/p&gt;
+
+&lt;p&gt;This is the sequence verification code:&lt;/p&gt;
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;k&quot;&gt;case&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;OP_CHECKSEQUENCEVERIFY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;!&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;flags&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_VERIFY_CHECKSEQUENCEVERIFY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+        &lt;span class=&quot;c1&quot;&gt;// not enabled; treat as a NOP3&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;stack&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;set_error&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serror&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_ERR_INVALID_STACK_OPERATION&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+    &lt;span class=&quot;c1&quot;&gt;// nSequence, like nLockTime, is a 32-bit unsigned integer&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// field. See the comment in CHECKLOCKTIMEVERIFY regarding&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// 5-byte numeric operands.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;CScriptNum&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;stacktop&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fRequireMinimal&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+    &lt;span class=&quot;c1&quot;&gt;// In the rare event that the argument may be &amp;lt; 0 due to&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// some arithmetic being done first, you can always use&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// 0 MAX CHECKSEQUENCEVERIFY.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;set_error&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serror&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_ERR_NEGATIVE_LOCKTIME&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+    &lt;span class=&quot;c1&quot;&gt;// To provide for future soft-fork extensibility, if the&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// operand has the disabled lock-time flag set,&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// CHECKSEQUENCEVERIFY behaves as a NOP.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;CTxIn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;SEQUENCE_LOCKTIME_DISABLE_FLAG&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+
+    &lt;span class=&quot;c1&quot;&gt;// Compare the specified sequence number with the input.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;!&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;checker&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;CheckSequence&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;set_error&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serror&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_ERR_UNSATISFIED_LOCKTIME&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Spot anything funky? Look closer…&lt;/p&gt;
+
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;    &lt;span class=&quot;c1&quot;&gt;// To provide for future soft-fork extensibility, if the&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// operand has the disabled lock-time flag set,&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// CHECKSEQUENCEVERIFY behaves as a NOP.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;CTxIn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;SEQUENCE_LOCKTIME_DISABLE_FLAG&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Here, where we say it behaves as a NOP we don’t check any rules and skip the checks.&lt;/p&gt;
+
+&lt;p&gt;See where the problem lies? If we ever &lt;em&gt;did&lt;/em&gt; get around to a future upgrade
+here, then old miners who refuse to upgrade would be more than happy to accept
+invalid transactions into their mempool, and then following the fork, would end
+up mining invalid blocks leading to potential network partitions.&lt;/p&gt;
+
+&lt;p&gt;That would be bad! Let’s not do that.&lt;/p&gt;
+
+&lt;p&gt;What we really should be doing is:&lt;/p&gt;
+
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;    &lt;span class=&quot;c1&quot;&gt;// To provide for future soft-fork extensibility, if the&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// operand has the disabled lock-time flag set,&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// CHECKSEQUENCEVERIFY behaves as a NOP.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;nSequence&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;CTxIn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;SEQUENCE_LOCKTIME_DISABLE_FLAG&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;flags&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+            &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;set_error&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serror&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Which is exactly what I propose to do in &lt;a href=&quot;https://github.com/bitcoin/bitcoin/pull/22871&quot;&gt;this PR&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;If this solution is adopted, then after the last release of the Bitcoin Core
+Implementation that has the unpatched code goes
+&lt;a href=&quot;https://bitcoincore.org/en/lifecycle/&quot;&gt;End-of-Life&lt;/a&gt;, we could safely deploy
+new sequence rules. Because it takes a while for software to go EOL, I hope we
+can patch this soon.&lt;/p&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">The other day I was writing some tests for BIP-119 (shoutout Gloria for the detailed feedback on improving tests). I noticed something peculiar while attempting to write static test vectors for CTV. This peculiar thing led me to discover a minor flaw in Bitcoin’s interpreter – it isn’t going to break anything in the short term, but it has implications for how certain upgrades might be done in the future.</summary></entry><entry><title type="html">Infrastructure Bill: It’s Go Time for Radical Self Custody</title><link href="http://rubin.io/bitcoin/2021/08/02/infrastructure-bill-thoughts/" rel="alternate" type="text/html" title="Infrastructure Bill: It’s Go Time for Radical Self Custody" /><published>2021-08-02T00:00:00+00:00</published><updated>2021-08-02T00:00:00+00:00</updated><id>http://rubin.io/bitcoin/2021/08/02/infrastructure-bill-thoughts</id><content type="html" xml:base="http://rubin.io/bitcoin/2021/08/02/infrastructure-bill-thoughts/">&lt;p&gt;&lt;a href=&quot;https://github.com/JeremyRubin/utxos.org/pull/4&quot;&gt;TL;DR: click here to answer call to action&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://github.com/JeremyRubin/utxos.org/pull/4&quot;&gt; &lt;img src=&quot;/public/img/bitcoin/virginchadcustody.png&quot; alt=&quot;&quot; /&gt; &lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The infrastructure bill draft has been circulating which contains language that
+would have massive impact for the crypto ecosystem (and Bitcoin) in the United
+States, and most likely globally. The broad implication of the proposed bill is
+that many types of service provider would be categorized as brokers, even if
+fully ‘non custodial’. E.g., a coinjoin coordinator might be a broker, even if
+they never take control of the funds, because they are facilitating a
+transaction. There’s a lot of nuance, and the language is still being changed,
+so we’ll see where it lands. But that’s not the point of this blog post.&lt;/p&gt;
+
+&lt;p&gt;The point of this blog post is that we need to &lt;em&gt;hurry the fuck up&lt;/em&gt; and improve
+the self-sovereign software available and widely used by bitcoiners. You heard
+me right, &lt;em&gt;hurry the fuck up&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;While there’s space for debate around perfect designs and optima for protocol
+improvements, these discussions take years to turn into code running in end
+users wallets. I do not believe that we have time to leisurely improve
+self-sovereign custody solutions while regulators figure out a wrench to throw
+in our spokes.&lt;/p&gt;
+
+&lt;p&gt;Why am I so concerned about this bill in particular? A confidential source
+tells me that this language came out of the blue, an executive branch driven
+regulatory ninja attack of sorts. Normally, when the government looks to
+regulate an industry, the provisions and terms get floated around by
+legislators for a long while with industry input, comment periods, and more.
+Then, when a bill or other rules get passed, it’s something that the industry
+has at least had a chance to weigh in on and prepare for. My source claims no
+one has seen the clauses in the infrastructure bill before, and they infer that
+may mean this is a part of a broader crack-down coming from specific political
+personalities and agencies. This means we may be seeing government actions
+further restricting users’ rights in the pipeline much sooner than anyone could
+anticipate.&lt;/p&gt;
+
+&lt;p&gt;I’ve long been saying that we should be deploying &lt;a href=&quot;https://utxos.org&quot;&gt;BIP-119
+CTV&lt;/a&gt; for congestion control &lt;em&gt;before&lt;/em&gt; we see broad congestion
+on the network. If you wait until a problem is manifest, it can take years to
+deploy a solution. This merits proactivity in solving a problem before it
+comes. Today, the need to improve self-custody looms urgently on the horizon.&lt;/p&gt;
+
+&lt;p&gt;CTV is not a panacea solution. It doesn’t magically fix all custodial issues.
+But, along with &lt;a href=&quot;https://learn.sapio-lang.org&quot;&gt;Sapio&lt;/a&gt;, it does offer a pathway
+to dramatically improving self custody options, letting users customize vault
+smart contracts which do not depend on any third parties. Deploying CTV now is
+an opportunity to put in motion the wheels for broad ecosystem support for
+these enhanced custody protocols. We may come up with better options in the
+future which may obsolete CTV in place of more clever technologies. I cheer
+those efforts. But we need solutions for Tomorrow.&lt;/p&gt;
+
+&lt;p&gt;A soft fork activation for CTV could be deployable for Bitcoin imminently,
+should the community embrace it. The spec is nearly 2 years old, the code has
+required only small updates to be mergeable with other changes to Bitcoin Core.
+The review burden is 185 lines of consensus code, and a couple hundred lines of
+tests. To that end I believe it is prudent for the Bitcoin community to embrace
+the deployment of CTV and I’m calling on the community to &lt;a href=&quot;https://github.com/JeremyRubin/utxos.org/pull/4&quot;&gt;soft-signal
+intent&lt;/a&gt; for a soft-fork
+activation of CTV.&lt;/p&gt;
+
+&lt;p&gt;We cannot control what rules state authorities attempt to mandate. But we can
+individually control our own compliance with measures we see as unjust, and as
+a community we can advance technologies and solutions that ensure that choice
+remains squarely in the hands of every user and not the service providers they
+may use.&lt;/p&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">TL;DR: click here to answer call to action</summary></entry><entry><title type="html">BIP-118 What Gets Hashed Chart</title><link href="http://rubin.io/bitcoin/2021/07/09/bip-118-sighash-chart/" rel="alternate" type="text/html" title="BIP-118 What Gets Hashed Chart" /><published>2021-07-09T00:00:00+00:00</published><updated>2021-07-09T00:00:00+00:00</updated><id>http://rubin.io/bitcoin/2021/07/09/bip-118-sighash-chart</id><content type="html" xml:base="http://rubin.io/bitcoin/2021/07/09/bip-118-sighash-chart/">&lt;p&gt;As a part of my ongoing review of BIP-118 I put together a
+&lt;a href=&quot;https://docs.google.com/spreadsheets/d/1KeWJ_cly9zoRX5_h70RTniRT2m8_iaVceK_aF6obWeM&quot;&gt;chart&lt;/a&gt;
+of what gets hashed under the current proposal.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://docs.google.com/spreadsheets/d/1KeWJ_cly9zoRX5_h70RTniRT2m8_iaVceK_aF6obWeM&quot;&gt;&lt;img src=&quot;/public/img/bip-118.png&quot; alt=&quot;BIP-118 Chart&quot; /&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Not tightly checked to be free of errors, but I figured such a chart would be
+helpful for folks evaluating BIP-118.&lt;/p&gt;
+
+&lt;p&gt;Perhaps the BIPs (generally, incl 34x) could be updated to present the
+information in such a chart – at least for me it’s much clearer than following
+a bunch of conditional logic (maybe if there’s ever desire for some consensus
+refactoring this could be a table in the code replacing the cond logic).
+A few highlighted nuances:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;input index is never signed (i previously thought one mode signed it). Key reuse under &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;APOAS | Default&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;APOAS | All&lt;/code&gt; is a bit extra unsafe given susceptibility to the “half-spend” problem. This limits usability of APO for covenants a-la CTV because you can’t stop someone from adding inputs to your contract nor can you prevent half-spend problems when reusing addresses.&lt;/li&gt;
+  &lt;li&gt;APO signs the Amounts, APOAS never does.&lt;/li&gt;
+  &lt;li&gt;APO signs both the SPK and the Tapleaf hash, meaning that APO binds itself to the entire script rather than just it’s fragment. There’s no setting which is “just this fragment”&lt;/li&gt;
+  &lt;li&gt;APO’s signature binds it to a specific script fragment &lt;em&gt;within&lt;/em&gt; a taproot key, but not a specific script path&lt;/li&gt;
+  &lt;li&gt;the flag “default” is not really a flag at all – when default is used (as a or’d byte) there are different results than when default is inferred (by absence of a byte) (this is maybe a bitcoin core specific quirk).&lt;/li&gt;
+  &lt;li&gt;There are 16 different possible modes total, so all combinations of flags mean &lt;em&gt;something&lt;/em&gt; (advisable or not as with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ACP | None&lt;/code&gt;)&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;*| Default&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;*| All&lt;/code&gt; overlap, so there’s an opportunity to either reserve or assign 4 additional sighash modes if desired. These could cover some of the gaps above, or be saved for future purposes rather than be wasted now. Another point of interest is – not to rock the boat – but because BIP-118 is defining a new key type we could do away with the notion that sighash flags are “flags” and convert to an enum (e.g., numbered 0-256 for whatever combination of fields each would incur) and give each signature type a sensible name, rather than thinking of things as a combo of flags (e.g., &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;APOAS&lt;/code&gt; is not some intersection of what &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;APO&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ACP&lt;/code&gt; do independently).&lt;/li&gt;
+&lt;/ul&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">As a part of my ongoing review of BIP-118 I put together a chart of what gets hashed under the current proposal.</summary></entry><entry><title type="html">Quantum Proofing Bitcoin with a CAT</title><link href="http://rubin.io/blog/2021/07/06/quantum-bitcoin/" rel="alternate" type="text/html" title="Quantum Proofing Bitcoin with a CAT" /><published>2021-07-06T00:00:00+00:00</published><updated>2021-07-06T00:00:00+00:00</updated><id>http://rubin.io/blog/2021/07/06/quantum-bitcoin</id><content type="html" xml:base="http://rubin.io/blog/2021/07/06/quantum-bitcoin/">&lt;p&gt;I recently published &lt;a href=&quot;https://rubin.io/blog/2021/07/02/signing-5-bytes/&quot;&gt;a blog
+post&lt;/a&gt; about signing up to a
+5 byte value using Bitcoin script arithmetic and Lamport signatures.&lt;/p&gt;
+
+&lt;p&gt;By itself, this is neat, but a little limited. What if we could sign longer
+messages? If we can sign up to 20 bytes, we could sign a HASH160 digest which
+is most likely quantum safe…&lt;/p&gt;
+
+&lt;p&gt;What would it mean if we signed the HASH160 digest of a signature? What the
+what? Why would we do that?&lt;/p&gt;
+
+&lt;p&gt;Well, as it turns out, even if a quantum computer were able to crack ECDSA, it
+would yield revealing the private key but not the ability to malleate the
+content of what was actually signed.  I asked my good friend and cryptographer
+&lt;a href=&quot;https://madars.org/&quot;&gt;Madars Virza&lt;/a&gt; if my intuition was correct, and he
+confirmed that it should be sufficient, but it’s definitely worth closer
+analysis before relying on this. While the ECDSA signature can be malleated to a
+different, negative form, if the signature is otherwise made immalleable there
+should only be one value the commitment can be opened to.&lt;/p&gt;
+
+&lt;p&gt;If we required the ECDSA signature be signed with a quantum proof signature
+algorithm, then we’d have a quantum proof Bitcoin! And the 5 byte signing scheme
+we discussed previously is a Lamport signature, which is quantum secure.
+Unfortunately, we need at least 20 contiguous bytes… so we need some sort of
+OP_CAT like operation.&lt;/p&gt;
+
+&lt;p&gt;OP_CAT can’t be directly soft forked to Segwit v0 because it modifies the
+stack, so instead we’ll (for simplicity) also show how to use a new opcode that
+uses verify semantics, OP_SUBSTRINGEQUALVERIFY that checks a splice of a string
+for equality.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;Fun Fact: OP_CAT existed in Bitcoin untill 2010, when Satoshi “secretly”
+forked out a bunch of opcodes. So in theory the original Bitcoin implementation
+supported Post Quantum cryptography out of the box!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;... FOR j in 0..=5
+    &amp;lt;0&amp;gt;
+    ... FOR i in 0..=31
+        SWAP hash160 DUP &amp;lt;H(K_j_i_1)&amp;gt; EQUAL IF DROP &amp;lt;2**i&amp;gt; ADD ELSE &amp;lt;H(K_j_i_0)&amp;gt; EQUALVERIFY ENDIF
+    ... END FOR
+    TOALTSTACK
+... END FOR
+
+DUP HASH160
+
+... IF CAT AVAILABLE
+    FROMALTSTACK
+    ... FOR j in 0..=5
+        FROMALTSTACK
+        CAT
+    ... END FOR
+    EQUALVERIFY
+... ELSE SUBSTRINGEQUALVERIFY AVAILABLE
+    ... FOR j in 0..=5
+        FROMALTSTACK &amp;lt;0+j*4&amp;gt; &amp;lt;4+j*4&amp;gt; SUBSTRINGEQUALVERIFY DROP DROP DROP
+    ...  END FOR
+    DROP
+... END IF
+
+&amp;lt;pk&amp;gt; CHECKSIG
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;That’s a long script… but will it fit? We need to verify 20 bytes of message
+each bit takes around 10 bytes script, an average of 3.375 bytes per number
+(counting pushes), and two 21 bytes keys = 55.375 bytes of program space and 21
+bytes of witness element per bit.&lt;/p&gt;
+
+&lt;p&gt;It fits! &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;20*8*55.375 = 8860&lt;/code&gt;, which leaves 1140 bytes less than the limit for
+the rest of the logic, which is plenty (around 15-40 bytes required for the rest
+of the logic, leaving 1100 free for custom signature checking). The stack size
+is 160 elements for the hash gadget, 3360 bytes.&lt;/p&gt;
+
+&lt;p&gt;This can probably be made a bit more efficient by expanding to a ternary
+representation.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;        SWAP hash160 DUP &amp;lt;H(K_j_i_0)&amp;gt; EQUAL  IF DROP  ELSE &amp;lt;3**i&amp;gt; SWAP DUP &amp;lt;H(K_j_i_T)&amp;gt; EQUAL IF DROP SUB ELSE &amp;lt;H(K_j_i_1)&amp;gt; EQUALVERIFY ADD  ENDIF ENDIF
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This should bring it up to roughly 85 bytes per trit, and there should be 101
+trits (&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;log(2**160)/log(3) == 100.94&lt;/code&gt;), so about 8560 bytes… a bit cheaper!
+But the witness stack is “only” &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;2121&lt;/code&gt; bytes…&lt;/p&gt;
+
+&lt;p&gt;As a homework exercise, maybe someone can prove the optimal choice of radix for
+this protocol… My guess is that base 4 is optimal!&lt;/p&gt;
+
+&lt;h2 id=&quot;taproot&quot;&gt;Taproot?&lt;/h2&gt;
+
+&lt;p&gt;What about Taproot? As far as I’m aware the commitment scheme (&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Q = pG + hash(pG
+|| m)G&lt;/code&gt;) can be securely opened to m even with a quantum computer (finding &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;q&lt;/code&gt;
+such that &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;qG = Q&lt;/code&gt; might be trivial, but suppose key path was disabled, then
+finding m and p such that the taproot equation holds should be difficult because
+of the hash, but I’d need to certify that claim better).  Therefore this
+script can nest inside of a Tapscript path – Tapscript also does not impose a
+length limit, 32 byte hashes could be used as well.&lt;/p&gt;
+
+&lt;p&gt;Further, to make keys reusable, there could be many Lamport keys comitted inside
+a taproot tree so that an address could be used for thousands of times before
+expiring. This could be used as a measure to protect accidental use rather than
+to support it.&lt;/p&gt;
+
+&lt;p&gt;Lastly, Schnorr actually has a stronger non-malleability property than ECDSA,
+the signatures will be binding to the approved transaction and once Lamport
+signed, even a quantum computer could not steal the funds.&lt;/p&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">I recently published a blog post about signing up to a 5 byte value using Bitcoin script arithmetic and Lamport signatures. By itself, this is neat, but a little limited. What if we could sign longer messages? If we can sign up to 20 bytes, we could sign a HASH160 digest which is most likely quantum safe… What would it mean if we signed the HASH160 digest of a signature? What the what? Why would we do that? Well, as it turns out, even if a quantum computer were able to crack ECDSA, it would yield revealing the private key but not the ability to malleate the content of what was actually signed. I asked my good friend and cryptographer Madars Virza if my intuition was correct, and he confirmed that it should be sufficient, but it’s definitely worth closer analysis before relying on this. While the ECDSA signature can be malleated to a different, negative form, if the signature is otherwise made immalleable there should only be one value the commitment can be opened to. If we required the ECDSA signature be signed with a quantum proof signature algorithm, then we’d have a quantum proof Bitcoin! And the 5 byte signing scheme we discussed previously is a Lamport signature, which is quantum secure. Unfortunately, we need at least 20 contiguous bytes… so we need some sort of OP_CAT like operation. OP_CAT can’t be directly soft forked to Segwit v0 because it modifies the stack, so instead we’ll (for simplicity) also show how to use a new opcode that uses verify semantics, OP_SUBSTRINGEQUALVERIFY that checks a splice of a string for equality. Fun Fact: OP_CAT existed in Bitcoin untill 2010, when Satoshi “secretly” forked out a bunch of opcodes. So in theory the original Bitcoin implementation supported Post Quantum cryptography out of the box! ... FOR j in 0..=5 &amp;lt;0&amp;gt; ... FOR i in 0..=31 SWAP hash160 DUP &amp;lt;H(K_j_i_1)&amp;gt; EQUAL IF DROP &amp;lt;2**i&amp;gt; ADD ELSE &amp;lt;H(K_j_i_0)&amp;gt; EQUALVERIFY ENDIF ... END FOR TOALTSTACK ... END FOR DUP HASH160 ... IF CAT AVAILABLE FROMALTSTACK ... FOR j in 0..=5 FROMALTSTACK CAT ... END FOR EQUALVERIFY ... ELSE SUBSTRINGEQUALVERIFY AVAILABLE ... FOR j in 0..=5 FROMALTSTACK &amp;lt;0+j*4&amp;gt; &amp;lt;4+j*4&amp;gt; SUBSTRINGEQUALVERIFY DROP DROP DROP ... END FOR DROP ... END IF &amp;lt;pk&amp;gt; CHECKSIG That’s a long script… but will it fit? We need to verify 20 bytes of message each bit takes around 10 bytes script, an average of 3.375 bytes per number (counting pushes), and two 21 bytes keys = 55.375 bytes of program space and 21 bytes of witness element per bit. It fits! 20*8*55.375 = 8860, which leaves 1140 bytes less than the limit for the rest of the logic, which is plenty (around 15-40 bytes required for the rest of the logic, leaving 1100 free for custom signature checking). The stack size is 160 elements for the hash gadget, 3360 bytes. This can probably be made a bit more efficient by expanding to a ternary representation. SWAP hash160 DUP &amp;lt;H(K_j_i_0)&amp;gt; EQUAL IF DROP ELSE &amp;lt;3**i&amp;gt; SWAP DUP &amp;lt;H(K_j_i_T)&amp;gt; EQUAL IF DROP SUB ELSE &amp;lt;H(K_j_i_1)&amp;gt; EQUALVERIFY ADD ENDIF ENDIF This should bring it up to roughly 85 bytes per trit, and there should be 101 trits (log(2**160)/log(3) == 100.94), so about 8560 bytes… a bit cheaper! But the witness stack is “only” 2121 bytes… As a homework exercise, maybe someone can prove the optimal choice of radix for this protocol… My guess is that base 4 is optimal! Taproot? What about Taproot? As far as I’m aware the commitment scheme (Q = pG + hash(pG || m)G) can be securely opened to m even with a quantum computer (finding q such that qG = Q might be trivial, but suppose key path was disabled, then finding m and p such that the taproot equation holds should be difficult because of the hash, but I’d need to certify that claim better). Therefore this script can nest inside of a Tapscript path – Tapscript also does not impose a length limit, 32 byte hashes could be used as well. Further, to make keys reusable, there could be many Lamport keys comitted inside a taproot tree so that an address could be used for thousands of times before expiring. This could be used as a measure to protect accidental use rather than to support it. Lastly, Schnorr actually has a stronger non-malleability property than ECDSA, the signatures will be binding to the approved transaction and once Lamport signed, even a quantum computer could not steal the funds.</summary></entry><entry><title type="html">CheckSigFromStack for 5 Byte Values</title><link href="http://rubin.io/blog/2021/07/02/signing-5-bytes/" rel="alternate" type="text/html" title="CheckSigFromStack for 5 Byte Values" /><published>2021-07-02T00:00:00+00:00</published><updated>2021-07-02T00:00:00+00:00</updated><id>http://rubin.io/blog/2021/07/02/signing-5-bytes</id><content type="html" xml:base="http://rubin.io/blog/2021/07/02/signing-5-bytes/">&lt;p&gt;I recently published &lt;a href=&quot;https://rubin.io/blog/2021/07/02/covenants/&quot;&gt;a blog post&lt;/a&gt;
+about covenants on Bitcoin.&lt;/p&gt;
+
+&lt;p&gt;Readers were quick to point out I hadn’t
+fully explained myself on a claim I made that you can do a form of
+CheckSigFromStack in Bitcoin today.&lt;/p&gt;
+
+&lt;p&gt;So I thought it would be worthwhile to fully describe the technique – for the
+archives.&lt;/p&gt;
+
+&lt;p&gt;There are two insights in this post:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;to use a bitwise expansion of the number&lt;/li&gt;
+  &lt;li&gt;to use a lamport signature&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Let’s look at the code in python and then translate to bitcoin script:&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;add_bit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;preimage&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;image_0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;image_1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;s&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sha256&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;preimage&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;s&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;==&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;image_1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;s&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;==&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;image_0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;else&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;assert&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;False&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;get_signed_number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;witnesses&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;List&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Hash&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;keys&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;List&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Tuple&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Hash&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;Hash&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]]):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;acc&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;preimage&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;enumerate&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;witnesses&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;acc&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;add_bit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;preimage&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;keys&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;][&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;keys&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;][&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;So what’s going on here? The signer generates a key which is a list of pairs of
+hash images to create the script.&lt;/p&gt;
+
+&lt;p&gt;To sign, the signer provides a witness of a list of preimages that match one or the other.&lt;/p&gt;
+
+&lt;p&gt;During validation, the network adds up a weighted value per preimage and checks
+that there are no left out values.&lt;/p&gt;
+
+&lt;p&gt;Let’s imagine a concrete use case: I want a third party to post-hoc sign a sequence lock. This is 16 bits.
+I can form the following script:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&amp;lt;pk&amp;gt; checksigverify
+0
+SWAP sha256 DUP &amp;lt;H(K_0_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;gt; ADD ELSE &amp;lt;H(K_0_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_1_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;1&amp;gt; ADD ELSE &amp;lt;H(K_1_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_2_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;2&amp;gt; ADD ELSE &amp;lt;H(K_2_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_3_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;3&amp;gt; ADD ELSE &amp;lt;H(K_3_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_4_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;4&amp;gt; ADD ELSE &amp;lt;H(K_4_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_5_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;5&amp;gt; ADD ELSE &amp;lt;H(K_5_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_6_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;6&amp;gt; ADD ELSE &amp;lt;H(K_6_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_7_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;7&amp;gt; ADD ELSE &amp;lt;H(K_7_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_8_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;8&amp;gt; ADD ELSE &amp;lt;H(K_8_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_9_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;9&amp;gt; ADD ELSE &amp;lt;H(K_9_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_10_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;10&amp;gt; ADD ELSE &amp;lt;H(K_10_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_11_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;11&amp;gt; ADD ELSE &amp;lt;H(K_11_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_12_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;12&amp;gt; ADD ELSE &amp;lt;H(K_12_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_13_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;13&amp;gt; ADD ELSE &amp;lt;H(K_13_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_14_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;14&amp;gt; ADD ELSE &amp;lt;H(K_14_0)&amp;gt; EQUALVERIFY ENDIF
+SWAP sha256 DUP &amp;lt;H(K_15_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;15&amp;gt; ADD ELSE &amp;lt;H(K_15_0)&amp;gt; EQUALVERIFY ENDIF
+CHECKSEQUENCEVERIFY
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;In order to sign a 16 bit value V, the owner of K simply puts on the stack the
+binary representation of V indexed into the K. E.g., to sign &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;53593&lt;/code&gt;, first
+expand to binary &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;0b1101000101011001&lt;/code&gt;, then put the appropriate K values on the
+stack.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;K_15_1
+K_14_1
+K_13_0
+K_12_1
+K_11_0
+K_10_0
+K_9_0
+K_8_1
+K_7_0
+K_6_1
+K_5_0
+K_4_1
+K_3_1
+K_2_0
+K_1_0
+K_0_1
+&amp;lt;sig&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This technique is kind of bulky! It’s around 80x16 = 1280 length for the
+gadget, and 528 bytes for the witnesses. So it is &lt;em&gt;doable&lt;/em&gt;, if not a bit
+expensive. There might be some more efficient scripts for this – would a
+trinary representation be more efficient?&lt;/p&gt;
+
+&lt;p&gt;The values that can be signed can be range limited either post-hoc (using
+OP_WITHIN) or internally as was done with the 16 bit value circuit where it’s
+impossible to do more than 16 bits.&lt;/p&gt;
+
+&lt;p&gt;Keys &lt;em&gt;can&lt;/em&gt; be reused across scripts, but signatures may only be constructed one
+time because a third party could take two signed messages and construct an
+unintended value (e.g., if you sign both 4 and 2 then a third party could
+construct 6).&lt;/p&gt;
+
+&lt;p&gt;There are certain applications where this could be used for an effect – for
+example, an oracle might have a bonding contract whereby posessing any K_i_0
+and K_i_1 allows the burning of funds.&lt;/p&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">I recently published a blog post about covenants on Bitcoin. Readers were quick to point out I hadn’t fully explained myself on a claim I made that you can do a form of CheckSigFromStack in Bitcoin today. So I thought it would be worthwhile to fully describe the technique – for the archives. There are two insights in this post: to use a bitwise expansion of the number to use a lamport signature Let’s look at the code in python and then translate to bitcoin script: def add_bit(idx, preimage, image_0, image_1): s = sha256(preimage) if s == image_1: return (1 &amp;lt;&amp;lt; idx) if s == image_0: return 0 else: assert False def get_signed_number(witnesses : List[Hash], keys : List[Tuple[Hash, Hash]]): acc = 0 for (idx, preimage) in enumerate(witnesses): acc += add_bit(idx, preimage, keys[idx][0], keys[idx][1]) return x So what’s going on here? The signer generates a key which is a list of pairs of hash images to create the script. To sign, the signer provides a witness of a list of preimages that match one or the other. During validation, the network adds up a weighted value per preimage and checks that there are no left out values. Let’s imagine a concrete use case: I want a third party to post-hoc sign a sequence lock. This is 16 bits. I can form the following script: &amp;lt;pk&amp;gt; checksigverify 0 SWAP sha256 DUP &amp;lt;H(K_0_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;gt; ADD ELSE &amp;lt;H(K_0_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_1_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;1&amp;gt; ADD ELSE &amp;lt;H(K_1_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_2_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;2&amp;gt; ADD ELSE &amp;lt;H(K_2_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_3_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;3&amp;gt; ADD ELSE &amp;lt;H(K_3_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_4_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;4&amp;gt; ADD ELSE &amp;lt;H(K_4_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_5_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;5&amp;gt; ADD ELSE &amp;lt;H(K_5_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_6_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;6&amp;gt; ADD ELSE &amp;lt;H(K_6_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_7_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;7&amp;gt; ADD ELSE &amp;lt;H(K_7_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_8_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;8&amp;gt; ADD ELSE &amp;lt;H(K_8_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_9_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;9&amp;gt; ADD ELSE &amp;lt;H(K_9_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_10_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;10&amp;gt; ADD ELSE &amp;lt;H(K_10_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_11_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;11&amp;gt; ADD ELSE &amp;lt;H(K_11_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_12_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;12&amp;gt; ADD ELSE &amp;lt;H(K_12_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_13_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;13&amp;gt; ADD ELSE &amp;lt;H(K_13_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_14_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;14&amp;gt; ADD ELSE &amp;lt;H(K_14_0)&amp;gt; EQUALVERIFY ENDIF SWAP sha256 DUP &amp;lt;H(K_15_1)&amp;gt; EQUAL IF DROP &amp;lt;1&amp;lt;&amp;lt;15&amp;gt; ADD ELSE &amp;lt;H(K_15_0)&amp;gt; EQUALVERIFY ENDIF CHECKSEQUENCEVERIFY In order to sign a 16 bit value V, the owner of K simply puts on the stack the binary representation of V indexed into the K. E.g., to sign 53593, first expand to binary 0b1101000101011001, then put the appropriate K values on the stack. K_15_1 K_14_1 K_13_0 K_12_1 K_11_0 K_10_0 K_9_0 K_8_1 K_7_0 K_6_1 K_5_0 K_4_1 K_3_1 K_2_0 K_1_0 K_0_1 &amp;lt;sig&amp;gt; This technique is kind of bulky! It’s around 80x16 = 1280 length for the gadget, and 528 bytes for the witnesses. So it is doable, if not a bit expensive. There might be some more efficient scripts for this – would a trinary representation be more efficient? The values that can be signed can be range limited either post-hoc (using OP_WITHIN) or internally as was done with the 16 bit value circuit where it’s impossible to do more than 16 bits. Keys can be reused across scripts, but signatures may only be constructed one time because a third party could take two signed messages and construct an unintended value (e.g., if you sign both 4 and 2 then a third party could construct 6). There are certain applications where this could be used for an effect – for example, an oracle might have a bonding contract whereby posessing any K_i_0 and K_i_1 allows the burning of funds.</summary></entry><entry><title type="html">Templates, Eltoo, and Covenants, Oh My!</title><link href="http://rubin.io/blog/2021/07/02/covenants/" rel="alternate" type="text/html" title="Templates, Eltoo, and Covenants, Oh My!" /><published>2021-07-02T00:00:00+00:00</published><updated>2021-07-02T00:00:00+00:00</updated><id>http://rubin.io/blog/2021/07/02/covenants</id><content type="html" xml:base="http://rubin.io/blog/2021/07/02/covenants/">&lt;p&gt;&lt;img src=&quot;/public/img/post-covenant-meme.png&quot; alt=&quot;&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;If you’ve been following The Discourse, you probably know that Taproot is
+merged, locked in, and will activate later this November. What you might not
+know is what’s coming next… and you wouldn’t be alone in that. There are a
+number of fantastic proposals floating around to further improve Bitcoin, but
+there’s no clear picture on what is ready to be added next and on what
+timeline. No one – core developer, technically enlightened individuals, power
+users, or plebs – can claim to know otherwise.&lt;/p&gt;
+
+&lt;p&gt;In this post I’m going to describe 4 loosely related possible upgrades to
+Bitcoin – SH_APO (BIP-118), OP_CAT, OP_CSFS, and OP_CTV (BIP-119). These four
+upgrades all relate to how the next generation of stateful smart contracts can
+be built on top of bitcoin. As such, there’s natural overlap – and competition
+– for mindshare for review and deployment. This post is my attempt to stitch
+together a path we might take to roll them out and why that ordering makes
+sense. This post is for developers and engineers building in the Bitcoin space,
+but is intended to be followable by anyone technical or not who has a keen
+interest in Bitcoin.&lt;/p&gt;
+
+&lt;h2 id=&quot;bitcoin-eschews-roadmaps-and-agendas&quot;&gt;Bitcoin Eschews Roadmaps and Agendas.&lt;/h2&gt;
+
+&lt;p&gt;I provide this maxim to make clear that this document is by no means an
+official roadmap, narrative, or prioritization. However, it is my own
+assessment of what the current most pragmatic approach to upgrading Bitcoin is,
+based on my understanding of the state of outstanding proposals and their
+interactions.&lt;/p&gt;
+
+&lt;p&gt;My priorities in producing this are to open a discussion on potential new
+features, risk minimization, and pragmatic design for Bitcoin.&lt;/p&gt;
+
+&lt;h3 id=&quot;upgrade-summaries&quot;&gt;Upgrade Summaries&lt;/h3&gt;
+
+&lt;p&gt;Below follows summaries of what each upgrade would enable and how it works. You
+might be tempted to skip it if you’re already familiar with the upgrades, but I
+recommend reading in any case as there are a few non obvious insights.&lt;/p&gt;
+
+&lt;h4 id=&quot;apo-sighash_anyprevout-sighash_anyprevoutanyscript&quot;&gt;APO: SIGHASH_ANYPREVOUT, SIGHASH_ANYPREVOUTANYSCRIPT&lt;/h4&gt;
+
+&lt;p&gt;Currently proposed as
+&lt;a href=&quot;https://github.com/bitcoin/bips/blob/d616d5492bc6e6566af1b9f9e43b660bcd48ca29/bip-0118.mediawiki&quot;&gt;BIP-118&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;APO provides two new signature digest algorithms that do not commit to the coin
+being spent, or the current script additionally. Essentially allowing scripts
+to use outputs that didn’t exist at the time the script was made. This would be
+a new promise enforced by Bitcoin (ex. “You can close this Lightning channel
+and receive these coins if you give me the right proof. If a newer proof comes
+in later I’ll trust that one instead.”).&lt;/p&gt;
+
+&lt;p&gt;APO’s primary purpose is to enable off chain protocols like
+&lt;a href=&quot;https://blockstream.com/2018/04/30/en-eltoo-next-lightning/&quot;&gt;Eltoo&lt;/a&gt;, an
+improved non-punitive payment channel protocol.&lt;/p&gt;
+
+&lt;p&gt;APO can also
+&lt;a href=&quot;https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2019-June/017038.html&quot;&gt;emulate&lt;/a&gt;
+some of the main features of CTV and could be made to work with Sapio,
+partially. See the complimentary upgrades section for more detail.&lt;/p&gt;
+
+&lt;h4 id=&quot;cat--variants&quot;&gt;CAT (+ variants)&lt;/h4&gt;
+
+&lt;p&gt;Currently no BIP. However, CAT exists in
+&lt;a href=&quot;https://github.com/ElementsProject/elements/blob/bd2e2d5c64d38286b2ca0519f1215bed228e4dcf/src/script/interpreter.cpp#L914-L933&quot;&gt;Elements&lt;/a&gt;
+and &lt;a href=&quot;https://github.com/bitcoincashorg/bitcoincash.org/blob/3e2e6da8c38dab7ba12149d327bc4b259aaad684/spec/may-2018-reenabled-opcodes.md&quot;&gt;Bitcoin
+Cash&lt;/a&gt;
+as a 520 byte limited form, so a proposal for Bitcoin can crib heavily from
+either.&lt;/p&gt;
+
+&lt;p&gt;Cat enables appending data onto other pieces of data. Diabolically simple
+functionality that has many advanced use cases by itself and in concert with
+other opcodes. There are many “straightforward” use cases of cat like requiring
+sighash types, requiring specific R values, etc, but there are too many devious
+use cases to list here.  Andrew Poelstra has a decent blogpost series (&lt;a href=&quot;https://www.wpsoftware.net/andrew/blog/cat-and-schnorr-tricks-i.html&quot;&gt;part
+1&lt;/a&gt; and
+&lt;a href=&quot;https://www.wpsoftware.net/andrew/blog/cat-and-schnorr-tricks-ii.html&quot;&gt;part
+ii&lt;/a&gt;) if
+you’re interested to read more. In particular, with much cleverness, it seems
+possible one could implement full covenants with just CAT, which covers
+(inefficiently) most of the other techniques discussed in this post.&lt;/p&gt;
+
+&lt;h4 id=&quot;csfs-checksigfromstack&quot;&gt;CSFS: CHECKSIGFROMSTACK&lt;/h4&gt;
+
+&lt;p&gt;Currently no BIP. However, CSFS exists in
+&lt;a href=&quot;https://github.com/ElementsProject/elements/blob/bd2e2d5c64d38286b2ca0519f1215bed228e4dcf/src/script/interpreter.cpp#L1580-L1618&quot;&gt;Elements&lt;/a&gt;
+and in &lt;a href=&quot;https://github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/op_checkdatasig.md&quot;&gt;Bitcoin
+Cash&lt;/a&gt;,
+so a proposal for Bitcoin can crib heavily from either.&lt;/p&gt;
+
+&lt;p&gt;CSFS enables checking of a signature against a message and key from the stack
+without including any transaction data.&lt;/p&gt;
+
+&lt;p&gt;Use cases include oracle protocols, key delegations, a &lt;a href=&quot;https://stanford2017.scalingbitcoin.org/files/Day1/SB2017_script_2_0.pdf&quot;&gt;channel update
+invalidation
+variant&lt;/a&gt;
+(Laolu claims this can be tweaked to be fully non punitive like eltoo, but
+you’ll need to bug him to write it up), and (+CAT) full covenants.&lt;/p&gt;
+
+&lt;h4 id=&quot;ctv-op_checktemplateverify&quot;&gt;CTV: OP_CHECKTEMPLATEVERIFY&lt;/h4&gt;
+
+&lt;p&gt;Currently proposed as
+&lt;a href=&quot;https://github.com/bitcoin/bips/blob/master/bip-0119.mediawiki&quot;&gt;BIP-119&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;CTV enables committing to a specific “next” transaction from script. This is
+the ability to make an unbreakable promise on chain which Bitcoin can enforce
+(e.g. “This coin can only be spent to my multisig, or my backup after a
+timelock”). This is a departure from normal script which is traditionally only
+concerned with restrictions on the sender, CTV imposes restrictions on the
+recipient. More technically, CTV is essentially the ability to embed a
+signature of a specific transaction inside of a script without needing any
+elliptic curve operations. The validation costs are low. For more advanced
+logic, you can nest multiple different CTV Hashes either using taproot or up to
+the script length limits in regular script.&lt;/p&gt;
+
+&lt;p&gt;CTV can be used for vaults, channels, and &lt;a href=&quot;https://utxos.org/uses/&quot;&gt;many other
+uses&lt;/a&gt;. There’s also
+&lt;a href=&quot;https://learn.sapio-lang.org&quot;&gt;Sapio&lt;/a&gt; which is a language and toolkit for
+creating many kinds of programs with CTV.&lt;/p&gt;
+
+&lt;p&gt;CTV compliments CSFS to be able to emulate APO-like functionality
+sufficient to build Eltoo, potentially making APO feature-wise redundant.&lt;/p&gt;
+
+&lt;h2 id=&quot;comparative-analysis&quot;&gt;Comparative Analysis&lt;/h2&gt;
+
+&lt;p&gt;Now that we’ve got the basics covered, let’s explore these upgrades
+comparatively across several dimensions.&lt;/p&gt;
+
+&lt;h3 id=&quot;design-specificity&quot;&gt;Design Specificity&lt;/h3&gt;
+
+&lt;p&gt;“Design Specificity” is a subjective measure of how substantially an upgrade
+could change from its current design while still meeting the features goals. It
+is not to be confused with security or safety. Ranked in order from most to
+least design specific, with non-exhaustive lists of design questions based on
+ongoing community discourse as well as my own personal understanding of what
+might be desirable.&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;CSFS&lt;/li&gt;
+  &lt;li&gt;CTV&lt;/li&gt;
+  &lt;li&gt;CAT&lt;/li&gt;
+  &lt;li&gt;APO&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h4 id=&quot;explanations--open-questions&quot;&gt;Explanations &amp;amp; Open Questions:&lt;/h4&gt;
+&lt;ol&gt;
+  &lt;li&gt;CSFS is very simple and there is essentially a single way to implement it. Three open questions are:
+    &lt;ol&gt;
+      &lt;li&gt;Should CSFS require some sort of tagged hash? Very likely answer is no –
+tags interfere with certain use cases)&lt;/li&gt;
+      &lt;li&gt;Should CSFS split the signature’s R &amp;amp; S value stack items for some
+applications that otherwise may require OP_CAT? E.g. using a pinned R
+ value allows you to extract a private key if ever double signed, using 2 R
+ values allows pay-to-reveal-key contracts. Most likely answer is no, if that is
+ desired then OP_CAT can be introduced&lt;/li&gt;
+      &lt;li&gt;Should CSFS support a cheap way to reference the taproot internal or
+external key? Perhaps, can be handled with undefined upgradeable
+ keytypes. One might want to use the internal key, if the signed data should be
+ valid independent of the tapscript tree.  One might want to use the external
+ key, if the data should only be valid for a single tapscript key + tree.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;CTV is a commitment to all data that can malleate TXID besides the inputs
+being spent, therefore CTV does not have much space for variation on design.
+    &lt;ol&gt;
+      &lt;li&gt;Should the digest be reordered or formatted differently? If there were
+more data on what types of covenants might be built in the future, a
+ better order could be picked. Some thought has already gone into an order and
+ commitments that make covenants easier, see the BIP for more. It’s also
+ possible the serialization format for the variable length fields (scriptsigs,
+ outputs) could be changed to make it easier to work with from script. (Maybe,
+ minor change)&lt;/li&gt;
+      &lt;li&gt;Should CTV include more template types? Possibly, CTV includes an upgrade
+mechanism baked in for new template types, so it is extensible for future
+ purposes.&lt;/li&gt;
+      &lt;li&gt;Should CTV commit to the amounts? CTV does not commit to the amount that
+a coin has. Input-inspecting functionality should be handled by separate
+ opcodes, as CTV would be overly restrictive otherwise. E.g. dynamic fees
+ through new inputs would be harder: given CTV’s design it is not possible to
+ detect which field did not match therefore it is not possible to script against
+ unexpected amount sent errors without some compromise (e.g. timeouts).&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;CAT is simplistic, and there are really few ways to implement it. However,
+because it requires some restrictions for security, there are difficult to
+ answer open design questions:
+    &lt;ol&gt;
+      &lt;li&gt;What is the appropriate maximum stack size CAT should permit? Currently
+the design in Elements is 520 bytes, the max general stack size permitted
+ in script.&lt;/li&gt;
+      &lt;li&gt;Should CAT be introduced or
+&lt;a href=&quot;https://github.com/ElementsProject/elements/pull/817&quot;&gt;SHASTREAM&lt;/a&gt;,
+ SUBSTRING, or another variant? There is a strong argument for SHASTREAM because
+ when constructing covenants (e.g. for use with CTV) based on TX data it’s
+ possible for size of a data field (e.g., serialization of all outputs) to
+ exceed 520 bytes.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;There are many tough questions that the community has grappled with during
+APO’s design and engineering process, generally asking how APO-like
+ techniques can be made ‘Generally Safe’ given iit breaks current assumptions
+ around address reuse.
+    &lt;ol&gt;
+      &lt;li&gt;Should APO require chaperone signatures (in order to ensure that replay
+is not done by 3rd parties)? Current Answer: No, anyone is free to burn
+ their keys by revealing them to similar effect.&lt;/li&gt;
+      &lt;li&gt;Should APO use key tagging to mark keys that can use APO: Current Answer:
+yes, APO should be “double opt-in” (both requiring a tag and a signer to
+ produce such a signature)&lt;/li&gt;
+      &lt;li&gt;Should APO allow signing with the external taproot key: Current Answer:
+no, because it makes APO not “double opt-in”.&lt;/li&gt;
+      &lt;li&gt;Should APO optimize signing with the internal taproot key? Answer:
+default key 0x01 refers to taproot internal key, so it can be made
+ cheaper if you’re going to need it without having to repeat the entire key.&lt;/li&gt;
+      &lt;li&gt;Should APO commit to the signing script? Answer: let’s do two variants.&lt;/li&gt;
+      &lt;li&gt;Should APO instead be a larger refactoring of sighash logic that
+encapsulates APO (e.g. sighash bitmasks)? Current Answer: No, APO is good
+ enough to ship as is and doesn’t preclude future work.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3 id=&quot;safety&quot;&gt;Safety&lt;/h3&gt;
+
+&lt;p&gt;This category covers how “safe” each change is ranked from safest to least
+safe. What makes a change more or less safe is how limited and foreseeable the
+uses are of a specific opcode, in other words, how well we understand what it
+can do or where it might interact poorly with deployed infrastructure.&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;CTV&lt;/li&gt;
+  &lt;li&gt;CSFS&lt;/li&gt;
+  &lt;li&gt;APO&lt;/li&gt;
+  &lt;li&gt;CAT&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;CTV is the safest new feature since fundamentally what it introduces is very
+similar to what can be done with pre-signed transactions, so it is only a pivot
+on trust and interactivity. Where there is some risk from CTV is that addresses
+(or rather, invoices) that are reused might have the same program behind them
+which could cause unintended behavior. This differs from the reuse problem in
+APO because the problem is stateless, that is, if you verify what is behind an
+address you will know what exists and does not exist. E.g., two payment channel
+addresses will create distinct payment channels that updates cannot be replayed
+across. In contrast with APO, paying one APO using address twice creates two
+instances of the same channel, state updates from one channel can be used on
+the other.&lt;/p&gt;
+
+&lt;p&gt;CSFS is the next safest, it is just a small piece of authenticated data. CSFS
+and CTV are relatively close in terms of safety, but CSFS is slightly less safe
+given a remote possibility of surprising  uses of it to perform unforeseen
+elliptic curve operations. This functionality already exists for up to 5-byte
+messages. A hash preimage revelation can emulate a signer compactly. Using
+binary expansions and addition could be used to allow signing of values more
+compactly (e.g., 2x16x32 byte hashes could be used to construct a signature of
+a post-hoc selected Sequence lock). &lt;a href=&quot;/blog/2021/07/02/signing-5-bytes/&quot;&gt;Read more here&lt;/a&gt;. Therefore it is appropriate to think of
+CSFS as an expansion of the efficiency of this technique, reusability of keys,
+and the types of data that can be signed over. Although CSFS is famously used
+to build covenants by comparing a CSFS signature to a CHECKSIG signature and
+getting transaction data onto the stack, CSFS cannot do that without CAT.&lt;/p&gt;
+
+&lt;p&gt;APO. This is the next safest because APO has some questions around key reuse
+safety and statefulness of information. See the above description in CTV for
+why this is tangibly worse for APO than CTV. &lt;a href=&quot;https://lists.linuxfoundation.org/pipermail/lightning-dev/2019-September/002176.html&quot;&gt;See more discussion of APO’s
+safety &amp;amp; design trade offs
+here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;CAT is the least ‘safe’ in terms of extant Bitcoin concepts as it is highly
+likely CAT introduces at least advanced covenants if added, especially in
+conjunction with the above opcodes, but may also enable other unintended
+functionality. CAT is a source of continual surprise with regards to what it
+enables in composition with existing opcodes, therefore a systematic review of
+composability and known uses should be done before considering it. That CAT was
+forked out by Satoshi is of limited relevance as the variant proposed for
+reintroduction would not have the vulnerability present initially.&lt;/p&gt;
+
+&lt;h3 id=&quot;complimentary-upgrades&quot;&gt;Complimentary Upgrades&lt;/h3&gt;
+
+&lt;p&gt;Pairings of upgrades can work together to deliver functionality that neither
+could alone:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;CAT + CSFS: full blown arbitrary covenants
+    &lt;ol&gt;
+      &lt;li&gt;With arbitrary covenants you can deploy many different kinds of smart
+contracts which are out of scope for this article.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;CAT + CTV: Expanded covenants
+    &lt;ol&gt;
+      &lt;li&gt;slightly simpler to use interface but fewer features than CSFS + CAT which can
+covenant over witness data and inputs.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;CTV + CSFS: Eltoo
+    &lt;ol&gt;
+      &lt;li&gt;This can add very similar functionality to eltoo with the script fragment:
+ &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;CTV &amp;lt;musig(pka, pkb)&amp;gt; CSFS &amp;lt;S+1&amp;gt; CLTV&lt;/code&gt;
+ The protocol is essentially identical to the Eltoo paper, however there are
+ a couple subtle differences required for dynamic fee rates.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+  &lt;li&gt;CTV + APO: Slightly Different
+    &lt;ol&gt;
+      &lt;li&gt;Several sources have claimed that APO offers a strict superset
+of CTV’s functionality (but not efficiency). This is false. Their digests
+are slightly different, as such there are some niche smart contracts that could
+use the differences in commitment structure for interesting effects (CTV
+commits to all scriptsigs and sequences, APO cannot cover that data but can
+cover a few variants of less data covered).&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;By all means not an exhaustive list – feel free to message me with additions.&lt;/p&gt;
+
+&lt;h3 id=&quot;recommendation&quot;&gt;Recommendation&lt;/h3&gt;
+
+&lt;p&gt;My recommendation is to deliver the upgrades described in this document in the
+following order:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;CTV&lt;/li&gt;
+  &lt;li&gt;CSFS&lt;/li&gt;
+  &lt;li&gt;APO&lt;/li&gt;
+  &lt;li&gt;CAT/SHASTREAM/SUBSTRING/etc&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;This recommendation comes as a synthesis of the thoughts above on the
+composability, safety, and open design considerations of the various proposals
+currently in flight.&lt;/p&gt;
+
+&lt;p&gt;With CTV in place, we can begin experimenting with a wide variety of contracts
+using the Sapio toolchain, as well as improve and invest in maturing the
+toolchain. Mature toolchains will make it easier to safely engineer and deploy
+applications making use of CTV and future upgrades.&lt;/p&gt;
+
+&lt;p&gt;CSFS is an independent change that can be deployed/developed in parallel to or
+before CTV, the implementation from Elements could be easily ported to Bitcoin.
+With CSFS and CTV, Eltoo-like constructions will be possible as well.&lt;/p&gt;
+
+&lt;p&gt;APO can then be deployed as an optimization to existing use patterns driven by
+market adoption of CTV+CSFS based use. This also gives us time to kick the can
+down the road on the design questions that APO prompts around generalization of
+signature digests and key reuse safety.  A similar approach was &lt;a href=&quot;https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2019-May/016996.html&quot;&gt;discussed on
+the mailing
+list&lt;/a&gt;,
+but without the insight that CSFS + CTV was sufficient for Eltoo like
+constructions, requiring CAT instead.&lt;/p&gt;
+
+&lt;p&gt;Lastly, OP_CAT can be delivered as part of an effort towards generalized
+arbitrary covenants and perhaps in conjunction with some special purpose
+opcodes (such as OP_CHECKINPUT) that can more easily handle common cases. CAT,
+although it has safe implementations used in Elements, deserves very strict
+scrutiny given it’s documented surprising uses.&lt;/p&gt;
+
+&lt;p&gt;This approach represents a gradual relaxation of Bitcoin’s restrictions around
+smart contract programming that introduces useful, safe primitives and gives
+the community time to build and deploy useful infrastructure. The path
+described in this post is an opportunity to upgrade bitcoin with simple
+primitives that compose nicely for permissionless innovation.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Thanks to those who reviewed drafts of this post and provided valuable
+feedback improving the clarity and accuracy of this post, including
+&lt;a href=&quot;https://github.com/pyskell&quot;&gt;pyskell&lt;/a&gt;, &lt;a href=&quot;https://twitter.com/ProofOfKeags&quot;&gt;Keagan
+McClelland&lt;/a&gt;, &lt;a href=&quot;https://twitter.com/RyanTheGentry&quot;&gt;Ryan
+Gentry&lt;/a&gt;, and &lt;a href=&quot;https://twitter.com/roasbeef&quot;&gt;Olaoluwa
+Osuntokun&lt;/a&gt;. Edit + Feedback ≠ Endorsement.&lt;/em&gt;&lt;/p&gt;</content><author><name>Jeremy Rubin</name></author><category term="bitcoin" /><summary type="html">If you’ve been following The Discourse, you probably know that Taproot is merged, locked in, and will activate later this November. What you might not know is what’s coming next… and you wouldn’t be alone in that. There are a number of fantastic proposals floating around to further improve Bitcoin, but there’s no clear picture on what is ready to be added next and on what timeline. No one – core developer, technically enlightened individuals, power users, or plebs – can claim to know otherwise. In this post I’m going to describe 4 loosely related possible upgrades to Bitcoin – SH_APO (BIP-118), OP_CAT, OP_CSFS, and OP_CTV (BIP-119). These four upgrades all relate to how the next generation of stateful smart contracts can be built on top of bitcoin. As such, there’s natural overlap – and competition – for mindshare for review and deployment. This post is my attempt to stitch together a path we might take to roll them out and why that ordering makes sense. This post is for developers and engineers building in the Bitcoin space, but is intended to be followable by anyone technical or not who has a keen interest in Bitcoin. Bitcoin Eschews Roadmaps and Agendas. I provide this maxim to make clear that this document is by no means an official roadmap, narrative, or prioritization. However, it is my own assessment of what the current most pragmatic approach to upgrading Bitcoin is, based on my understanding of the state of outstanding proposals and their interactions. My priorities in producing this are to open a discussion on potential new features, risk minimization, and pragmatic design for Bitcoin. Upgrade Summaries Below follows summaries of what each upgrade would enable and how it works. You might be tempted to skip it if you’re already familiar with the upgrades, but I recommend reading in any case as there are a few non obvious insights. APO: SIGHASH_ANYPREVOUT, SIGHASH_ANYPREVOUTANYSCRIPT Currently proposed as BIP-118. APO provides two new signature digest algorithms that do not commit to the coin being spent, or the current script additionally. Essentially allowing scripts to use outputs that didn’t exist at the time the script was made. This would be a new promise enforced by Bitcoin (ex. “You can close this Lightning channel and receive these coins if you give me the right proof. If a newer proof comes in later I’ll trust that one instead.”). APO’s primary purpose is to enable off chain protocols like Eltoo, an improved non-punitive payment channel protocol. APO can also emulate some of the main features of CTV and could be made to work with Sapio, partially. See the complimentary upgrades section for more detail. CAT (+ variants) Currently no BIP. However, CAT exists in Elements and Bitcoin Cash as a 520 byte limited form, so a proposal for Bitcoin can crib heavily from either. Cat enables appending data onto other pieces of data. Diabolically simple functionality that has many advanced use cases by itself and in concert with other opcodes. There are many “straightforward” use cases of cat like requiring sighash types, requiring specific R values, etc, but there are too many devious use cases to list here. Andrew Poelstra has a decent blogpost series (part 1 and part ii) if you’re interested to read more. In particular, with much cleverness, it seems possible one could implement full covenants with just CAT, which covers (inefficiently) most of the other techniques discussed in this post. CSFS: CHECKSIGFROMSTACK Currently no BIP. However, CSFS exists in Elements and in Bitcoin Cash, so a proposal for Bitcoin can crib heavily from either. CSFS enables checking of a signature against a message and key from the stack without including any transaction data. Use cases include oracle protocols, key delegations, a channel update invalidation variant (Laolu claims this can be tweaked to be fully non punitive like eltoo, but you’ll need to bug him to write it up), and (+CAT) full covenants. CTV: OP_CHECKTEMPLATEVERIFY Currently proposed as BIP-119. CTV enables committing to a specific “next” transaction from script. This is the ability to make an unbreakable promise on chain which Bitcoin can enforce (e.g. “This coin can only be spent to my multisig, or my backup after a timelock”). This is a departure from normal script which is traditionally only concerned with restrictions on the sender, CTV imposes restrictions on the recipient. More technically, CTV is essentially the ability to embed a signature of a specific transaction inside of a script without needing any elliptic curve operations. The validation costs are low. For more advanced logic, you can nest multiple different CTV Hashes either using taproot or up to the script length limits in regular script. CTV can be used for vaults, channels, and many other uses. There’s also Sapio which is a language and toolkit for creating many kinds of programs with CTV. CTV compliments CSFS to be able to emulate APO-like functionality sufficient to build Eltoo, potentially making APO feature-wise redundant. Comparative Analysis Now that we’ve got the basics covered, let’s explore these upgrades comparatively across several dimensions. Design Specificity “Design Specificity” is a subjective measure of how substantially an upgrade could change from its current design while still meeting the features goals. It is not to be confused with security or safety. Ranked in order from most to least design specific, with non-exhaustive lists of design questions based on ongoing community discourse as well as my own personal understanding of what might be desirable. CSFS CTV CAT APO Explanations &amp;amp; Open Questions: CSFS is very simple and there is essentially a single way to implement it. Three open questions are: Should CSFS require some sort of tagged hash? Very likely answer is no – tags interfere with certain use cases) Should CSFS split the signature’s R &amp;amp; S value stack items for some applications that otherwise may require OP_CAT? E.g. using a pinned R value allows you to extract a private key if ever double signed, using 2 R values allows pay-to-reveal-key contracts. Most likely answer is no, if that is desired then OP_CAT can be introduced Should CSFS support a cheap way to reference the taproot internal or external key? Perhaps, can be handled with undefined upgradeable keytypes. One might want to use the internal key, if the signed data should be valid independent of the tapscript tree. One might want to use the external key, if the data should only be valid for a single tapscript key + tree. CTV is a commitment to all data that can malleate TXID besides the inputs being spent, therefore CTV does not have much space for variation on design. Should the digest be reordered or formatted differently? If there were more data on what types of covenants might be built in the future, a better order could be picked. Some thought has already gone into an order and commitments that make covenants easier, see the BIP for more. It’s also possible the serialization format for the variable length fields (scriptsigs, outputs) could be changed to make it easier to work with from script. (Maybe, minor change) Should CTV include more template types? Possibly, CTV includes an upgrade mechanism baked in for new template types, so it is extensible for future purposes. Should CTV commit to the amounts? CTV does not commit to the amount that a coin has. Input-inspecting functionality should be handled by separate opcodes, as CTV would be overly restrictive otherwise. E.g. dynamic fees through new inputs would be harder: given CTV’s design it is not possible to detect which field did not match therefore it is not possible to script against unexpected amount sent errors without some compromise (e.g. timeouts). CAT is simplistic, and there are really few ways to implement it. However, because it requires some restrictions for security, there are difficult to answer open design questions: What is the appropriate maximum stack size CAT should permit? Currently the design in Elements is 520 bytes, the max general stack size permitted in script. Should CAT be introduced or SHASTREAM, SUBSTRING, or another variant? There is a strong argument for SHASTREAM because when constructing covenants (e.g. for use with CTV) based on TX data it’s possible for size of a data field (e.g., serialization of all outputs) to exceed 520 bytes. There are many tough questions that the community has grappled with during APO’s design and engineering process, generally asking how APO-like techniques can be made ‘Generally Safe’ given iit breaks current assumptions around address reuse. Should APO require chaperone signatures (in order to ensure that replay is not done by 3rd parties)? Current Answer: No, anyone is free to burn their keys by revealing them to similar effect. Should APO use key tagging to mark keys that can use APO: Current Answer: yes, APO should be “double opt-in” (both requiring a tag and a signer to produce such a signature) Should APO allow signing with the external taproot key: Current Answer: no, because it makes APO not “double opt-in”. Should APO optimize signing with the internal taproot key? Answer: default key 0x01 refers to taproot internal key, so it can be made cheaper if you’re going to need it without having to repeat the entire key. Should APO commit to the signing script? Answer: let’s do two variants. Should APO instead be a larger refactoring of sighash logic that encapsulates APO (e.g. sighash bitmasks)? Current Answer: No, APO is good enough to ship as is and doesn’t preclude future work. Safety This category covers how “safe” each change is ranked from safest to least safe. What makes a change more or less safe is how limited and foreseeable the uses are of a specific opcode, in other words, how well we understand what it can do or where it might interact poorly with deployed infrastructure. CTV CSFS APO CAT CTV is the safest new feature since fundamentally what it introduces is very similar to what can be done with pre-signed transactions, so it is only a pivot on trust and interactivity. Where there is some risk from CTV is that addresses (or rather, invoices) that are reused might have the same program behind them which could cause unintended behavior. This differs from the reuse problem in APO because the problem is stateless, that is, if you verify what is behind an address you will know what exists and does not exist. E.g., two payment channel addresses will create distinct payment channels that updates cannot be replayed across. In contrast with APO, paying one APO using address twice creates two instances of the same channel, state updates from one channel can be used on the other. CSFS is the next safest, it is just a small piece of authenticated data. CSFS and CTV are relatively close in terms of safety, but CSFS is slightly less safe given a remote possibility of surprising uses of it to perform unforeseen elliptic curve operations. This functionality already exists for up to 5-byte messages. A hash preimage revelation can emulate a signer compactly. Using binary expansions and addition could be used to allow signing of values more compactly (e.g., 2x16x32 byte hashes could be used to construct a signature of a post-hoc selected Sequence lock). Read more here. Therefore it is appropriate to think of CSFS as an expansion of the efficiency of this technique, reusability of keys, and the types of data that can be signed over. Although CSFS is famously used to build covenants by comparing a CSFS signature to a CHECKSIG signature and getting transaction data onto the stack, CSFS cannot do that without CAT. APO. This is the next safest because APO has some questions around key reuse safety and statefulness of information. See the above description in CTV for why this is tangibly worse for APO than CTV. See more discussion of APO’s safety &amp;amp; design trade offs here. CAT is the least ‘safe’ in terms of extant Bitcoin concepts as it is highly likely CAT introduces at least advanced covenants if added, especially in conjunction with the above opcodes, but may also enable other unintended functionality. CAT is a source of continual surprise with regards to what it enables in composition with existing opcodes, therefore a systematic review of composability and known uses should be done before considering it. That CAT was forked out by Satoshi is of limited relevance as the variant proposed for reintroduction would not have the vulnerability present initially. Complimentary Upgrades Pairings of upgrades can work together to deliver functionality that neither could alone: CAT + CSFS: full blown arbitrary covenants With arbitrary covenants you can deploy many different kinds of smart contracts which are out of scope for this article. CAT + CTV: Expanded covenants slightly simpler to use interface but fewer features than CSFS + CAT which can covenant over witness data and inputs. CTV + CSFS: Eltoo This can add very similar functionality to eltoo with the script fragment: CTV &amp;lt;musig(pka, pkb)&amp;gt; CSFS &amp;lt;S+1&amp;gt; CLTV The protocol is essentially identical to the Eltoo paper, however there are a couple subtle differences required for dynamic fee rates. CTV + APO: Slightly Different Several sources have claimed that APO offers a strict superset of CTV’s functionality (but not efficiency). This is false. Their digests are slightly different, as such there are some niche smart contracts that could use the differences in commitment structure for interesting effects (CTV commits to all scriptsigs and sequences, APO cannot cover that data but can cover a few variants of less data covered). By all means not an exhaustive list – feel free to message me with additions. Recommendation My recommendation is to deliver the upgrades described in this document in the following order: CTV CSFS APO CAT/SHASTREAM/SUBSTRING/etc This recommendation comes as a synthesis of the thoughts above on the composability, safety, and open design considerations of the various proposals currently in flight. With CTV in place, we can begin experimenting with a wide variety of contracts using the Sapio toolchain, as well as improve and invest in maturing the toolchain. Mature toolchains will make it easier to safely engineer and deploy applications making use of CTV and future upgrades. CSFS is an independent change that can be deployed/developed in parallel to or before CTV, the implementation from Elements could be easily ported to Bitcoin. With CSFS and CTV, Eltoo-like constructions will be possible as well. APO can then be deployed as an optimization to existing use patterns driven by market adoption of CTV+CSFS based use. This also gives us time to kick the can down the road on the design questions that APO prompts around generalization of signature digests and key reuse safety. A similar approach was discussed on the mailing list, but without the insight that CSFS + CTV was sufficient for Eltoo like constructions, requiring CAT instead. Lastly, OP_CAT can be delivered as part of an effort towards generalized arbitrary covenants and perhaps in conjunction with some special purpose opcodes (such as OP_CHECKINPUT) that can more easily handle common cases. CAT, although it has safe implementations used in Elements, deserves very strict scrutiny given it’s documented surprising uses. This approach represents a gradual relaxation of Bitcoin’s restrictions around smart contract programming that introduces useful, safe primitives and gives the community time to build and deploy useful infrastructure. The path described in this post is an opportunity to upgrade bitcoin with simple primitives that compose nicely for permissionless innovation. Thanks to those who reviewed drafts of this post and provided valuable feedback improving the clarity and accuracy of this post, including pyskell, Keagan McClelland, Ryan Gentry, and Olaoluwa Osuntokun. Edit + Feedback ≠ Endorsement.</summary></entry><entry><title type="html">Designing Bitcoin Contracts with Sapio</title><link href="http://rubin.io/talks/2021/06/10/bitcoin21-talk/" rel="alternate" type="text/html" title="Designing Bitcoin Contracts with Sapio" /><published>2021-06-10T00:00:00+00:00</published><updated>2021-06-10T00:00:00+00:00</updated><id>http://rubin.io/talks/2021/06/10/bitcoin21-talk</id><content type="html" xml:base="http://rubin.io/talks/2021/06/10/bitcoin21-talk/">&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/w3FL0kEO_R4&quot; title=&quot;YouTube video player&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;</content><author><name>Jeremy Rubin</name></author><category term="talks" /><category term="bitcoin" /><summary type="html"></summary></entry><entry><title type="html">Bitcoin is DeFi Panel</title><link href="http://rubin.io/talks/2021/06/09/bitcoin21-panel/" rel="alternate" type="text/html" title="Bitcoin is DeFi Panel" /><published>2021-06-09T00:00:00+00:00</published><updated>2021-06-09T00:00:00+00:00</updated><id>http://rubin.io/talks/2021/06/09/bitcoin21-panel</id><content type="html" xml:base="http://rubin.io/talks/2021/06/09/bitcoin21-panel/">&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/VQgklSuo0KU&quot; title=&quot;YouTube video player&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;</content><author><name>Jeremy Rubin</name></author><category term="talks" /><category term="bitcoin" /><summary type="html"></summary></entry><entry><title type="html">How Taproot Could Improve Bitcoin — If It Gets Adopted</title><link href="http://rubin.io/talks/2021/06/04/unconfirmed-taproot/" rel="alternate" type="text/html" title="How Taproot Could Improve Bitcoin — If It Gets Adopted" /><published>2021-06-04T00:00:00+00:00</published><updated>2021-06-04T00:00:00+00:00</updated><id>http://rubin.io/talks/2021/06/04/unconfirmed-taproot</id><content type="html" xml:base="http://rubin.io/talks/2021/06/04/unconfirmed-taproot/">&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/pAcCNDiJX-I&quot; title=&quot;YouTube video player&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;</content><author><name>Jeremy Rubin</name></author><category term="talks" /><category term="bitcoin" /><summary type="html"></summary></entry><entry><title type="html">Fireside Chat Jeremy Rubin BTC Core Dev &amp;amp; Judica</title><link href="http://rubin.io/talks/2020/09/15/cryptofinally/" rel="alternate" type="text/html" title="Fireside Chat Jeremy Rubin BTC Core Dev &amp;amp; Judica" /><published>2020-09-15T00:00:00+00:00</published><updated>2020-09-15T00:00:00+00:00</updated><id>http://rubin.io/talks/2020/09/15/cryptofinally</id><content type="html" xml:base="http://rubin.io/talks/2020/09/15/cryptofinally/">&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/srMXBHkoxEM&quot; title=&quot;YouTube video player&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;</content><author><name>Jeremy Rubin</name></author><category term="talks" /><category term="bitcoin" /><summary type="html"></summary></entry></feed>
